@@ -17,20 +17,22 @@
 package com.android.packageinstaller;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageDeleteObserver;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
-import android.view.Window;
 import android.view.View.OnClickListener;
 import android.widget.Button;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 /**
  * This activity corresponds to a download progress screen that is displayed 
@@ -43,8 +45,10 @@ public class UninstallAppProgress extends Activity implements OnClickListener {
     private final String TAG="UninstallAppProgress";
     private boolean localLOGV = false;
     private ApplicationInfo mAppInfo;
+    private boolean mAllUsers;
     private TextView mStatusTextView;
     private Button mOkButton;
+    private Button mDeviceManagerButton;
     private ProgressBar mProgressBar;
     private View mOkPanel;
     private volatile int mResultCode = -1;
@@ -55,15 +59,45 @@ public class UninstallAppProgress extends Activity implements OnClickListener {
         public void handleMessage(Message msg) {
             switch (msg.what) {
                 case UNINSTALL_COMPLETE:
-                    mResultCode = msg.arg1;
-                    // Update the status text
-                    if (msg.arg1 == SUCCEEDED) {
-                        mStatusTextView.setText(R.string.uninstall_done);
-                    } else {
-                        mStatusTextView.setText(R.string.uninstall_failed);
+                    if (getIntent().getBooleanExtra(Intent.EXTRA_RETURN_RESULT, false)) {
+                        Intent result = new Intent();
+                        result.putExtra(Intent.EXTRA_INSTALL_RESULT, msg.arg1);
+                        setResult(msg.arg1 == PackageManager.DELETE_SUCCEEDED
+                                ? Activity.RESULT_OK : Activity.RESULT_FIRST_USER,
+                                        result);
+                        finish();
+                        return;
                     }
+
+                    mResultCode = msg.arg1;
+                    final String packageName = (String) msg.obj;
+
+                    // Update the status text
+                    final int statusText;
+                    switch (msg.arg1) {
+                        case PackageManager.DELETE_SUCCEEDED:
+                            statusText = R.string.uninstall_done;
+                            // Show a Toast and finish the activity
+                            Context ctx = getBaseContext();
+                            Toast.makeText(ctx, statusText, Toast.LENGTH_LONG).show();
+                            setResultAndFinish(mResultCode);
+                            return;
+                        case PackageManager.DELETE_FAILED_DEVICE_POLICY_MANAGER:
+                            Log.d(TAG, "Uninstall failed because " + packageName
+                                    + " is a device admin");
+                            mDeviceManagerButton.setVisibility(View.VISIBLE);
+                            statusText = R.string.uninstall_failed_device_policy_manager;
+                            break;
+                        default:
+                            Log.d(TAG, "Uninstall failed for " + packageName + " with code "
+                                    + msg.arg1);
+                            statusText = R.string.uninstall_failed;
+                            break;
+                    }
+                    mStatusTextView.setText(statusText);
+
+                    // Hide the progress bar; Show the ok button
                     mProgressBar.setVisibility(View.INVISIBLE);
-                    // Show the ok button
                     mOkPanel.setVisibility(View.VISIBLE);
                     break;
                 default:
@@ -71,19 +105,21 @@ public class UninstallAppProgress extends Activity implements OnClickListener {
             }
         }
     };
-    
+
     @Override
     public void onCreate(Bundle icicle) {
         super.onCreate(icicle);
         Intent intent = getIntent();
         mAppInfo = intent.getParcelableExtra(PackageUtil.INTENT_ATTR_APPLICATION_INFO);
+        mAllUsers = intent.getBooleanExtra(Intent.EXTRA_UNINSTALL_ALL_USERS, false);
         initView();
     }
     
     class PackageDeleteObserver extends IPackageDeleteObserver.Stub {
-        public void packageDeleted(boolean succeeded) {
+        public void packageDeleted(String packageName, int returnCode) {
             Message msg = mHandler.obtainMessage(UNINSTALL_COMPLETE);
-            msg.arg1 = succeeded?SUCCEEDED:FAILED;
+            msg.arg1 = returnCode;
+            msg.obj = packageName;
             mHandler.sendMessage(msg);
         }
     }
@@ -94,21 +130,38 @@ public class UninstallAppProgress extends Activity implements OnClickListener {
     }
     
     public void initView() {
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        boolean isUpdate = ((mAppInfo.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0);
+        setTitle(isUpdate ? R.string.uninstall_update_title : R.string.uninstall_application_title);
+
         setContentView(R.layout.uninstall_progress);
         // Initialize views
-        PackageUtil.initSnippetForInstalledApp(this, mAppInfo, R.id.app_snippet);
-        mStatusTextView = (TextView)findViewById(R.id.center_text);
+        View snippetView = findViewById(R.id.app_snippet);
+        PackageUtil.initSnippetForInstalledApp(this, mAppInfo, snippetView);
+        mStatusTextView = (TextView) findViewById(R.id.center_text);
         mStatusTextView.setText(R.string.uninstalling);
+        mDeviceManagerButton = (Button) findViewById(R.id.device_manager_button);
+        mDeviceManagerButton.setVisibility(View.GONE);
+        mDeviceManagerButton.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent();
+                intent.setClassName("com.android.settings",
+                        "com.android.settings.Settings$DeviceAdminSettingsActivity");
+                intent.setFlags(Intent.FLAG_ACTIVITY_NO_HISTORY | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                finish();
+            }
+        });
         mProgressBar = (ProgressBar) findViewById(R.id.progress_bar);
         mProgressBar.setIndeterminate(true);
         // Hide button till progress is being displayed
-        mOkPanel = (View)findViewById(R.id.ok_panel);
-        mOkButton = (Button)findViewById(R.id.ok_button);
+        mOkPanel = (View) findViewById(R.id.ok_panel);
+        mOkButton = (Button) findViewById(R.id.ok_button);
         mOkButton.setOnClickListener(this);
         mOkPanel.setVisibility(View.INVISIBLE);
         PackageDeleteObserver observer = new PackageDeleteObserver();
-        getPackageManager().deletePackage(mAppInfo.packageName, observer, 0);
+        getPackageManager().deletePackage(mAppInfo.packageName, observer,
+                mAllUsers ? PackageManager.DELETE_ALL_USERS : 0);
     }
 
     public void onClick(View v) {
